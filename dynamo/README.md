@@ -87,7 +87,8 @@ Record TTFT / ITL / throughput here once measured.
 - [x] Aggregated stack boots, worker loads weights, NSA selected on H200, registers
 - [x] OpenAI smoke tests pass: `/v1/models` lists `glm-5.2-fp8`; chat completion
       returns a clean answer with `reasoning_content` (glm45 reasoning parser working)
-- [ ] Tool-call (`glm47`) exercised with a real tool schema
+- [x] Tool-call (`glm47`) exercised with a real tool schema — `get_weather` via the
+      LiteLLM gateway returns `finish_reason: tool_calls` with structured args
 - [ ] Benchmark vs vLLM recorded
 
 ### Build gotchas (this environment)
