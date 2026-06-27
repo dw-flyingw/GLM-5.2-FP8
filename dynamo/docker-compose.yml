@@ -1,0 +1,94 @@
+# NVIDIA Dynamo serving stack for GLM-5.2-FP8 on 8x H200 (sprocket).
+#
+# Engine: Dynamo SGLang backend (SGLang 0.5.11 in sglang-runtime:1.2.1-cuda13).
+# SGLang is NVIDIA's blessed path for GLM-5 on Dynamo; its `nsa` (Native Sparse
+# Attention) backend handles GLM-5.2's DeepSeek-style sparse attention (DSA).
+# We use it because no Dynamo vLLM runtime ships vLLM >= 0.23.0 yet (required by
+# the vLLM path for GLM-5.2's head_size=704 sparse MLA).
+#
+# Topology: AGGREGATED, tensor-parallel across all 8 GPUs. The model is ~756 GB,
+# so a full copy needs ~6 H200s; a disaggregated prefill+decode split (a full
+# copy PER worker) does not fit on one node -- that requires >= 2 nodes.
+#
+# All services use host networking, so the frontend binds :8000 on the host and
+# workers reach etcd (:2379) / nats (:4222) over localhost.
+
+x-dynamo-env: &dynamo-env
+  ETCD_ENDPOINTS: "http://localhost:2379"
+  NATS_SERVER: "nats://localhost:4222"
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.21
+    network_mode: host
+    command:
+      - etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://localhost:2379
+    volumes:
+      - etcd-data:/etcd-data
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.10-alpine
+    network_mode: host
+    command: ["-js", "-m", "8222"]   # JetStream on, monitoring on :8222
+    restart: unless-stopped
+
+  frontend:
+    image: ${DYNAMO_IMAGE:-glm52-dynamo-sglang:0.5.13post1}
+    network_mode: host
+    environment:
+      <<: *dynamo-env
+      # The frontend loads the model's config/tokenizer (not weights) on discovery.
+      # Point it at the local HF cache + offline so it doesn't try huggingface.co
+      # (no internet/proxy in-container).
+      HF_HOME: "${HF_CACHE:-/data/huggingface}"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - "${HF_CACHE:-/data/huggingface}:${HF_CACHE:-/data/huggingface}"
+    depends_on: [etcd, nats]
+    entrypoint: ["python3", "-m", "dynamo.frontend"]
+    command: ["--http-port", "${PORT:-8000}"]
+    restart: unless-stopped
+
+  # Aggregated worker: full model, tensor-parallel over all 8 GPUs.
+  worker:
+    image: ${DYNAMO_IMAGE:-glm52-dynamo-sglang:0.5.13post1}
+    network_mode: host
+    gpus: all
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      <<: *dynamo-env
+      HF_HOME: "${HF_CACHE:-/data/huggingface}"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - "${HF_CACHE:-/data/huggingface}:${HF_CACHE:-/data/huggingface}"
+    depends_on: [etcd, nats]
+    entrypoint: ["python3", "-m", "dynamo.sglang"]
+    # SGLang engine args pass straight through. nsa backend + fp8 KV mirror
+    # NVIDIA's GLM-5 recipe; parsers are the Dynamo-side (frontend) parsers.
+    command:
+      - --model-path=${MODEL:-zai-org/GLM-5.2-FP8}
+      - --served-model-name=${SERVED_NAME:-glm-5.2-fp8}
+      - --tp-size=${TP_SIZE:-8}
+      - --kv-cache-dtype=fp8_e4m3
+      - --mem-fraction-static=${MEM_FRACTION:-0.85}
+      - --attention-backend=nsa
+      - --page-size=${PAGE_SIZE:-64}
+      - --context-length=${MAX_MODEL_LEN:-262144}
+      - --trust-remote-code
+      - --dyn-tool-call-parser=glm47
+      - --dyn-reasoning-parser=glm45
+    # EXTRA_ARGS lets you add MTP/EAGLE speculative decoding etc. without editing
+    # this file, e.g. EXTRA_ARGS="--speculative-algorithm EAGLE ..." (see README).
+    # (compose has no array-append; pass perf knobs via env-substituted flags above
+    #  or uncomment and extend the command list.)
+    restart: "no"
+
+volumes:
+  etcd-data:
