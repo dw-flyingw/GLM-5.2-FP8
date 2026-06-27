@@ -98,6 +98,9 @@ Record TTFT / ITL / throughput here once measured.
   config/tokenizer (not weights) and will otherwise try huggingface.co and fail —
   the compose mounts the HF cache + sets `HF_HUB_OFFLINE=1` for the frontend too.
 - **First start is slow:** SGLang runs a DeepGEMM JIT pre-compile (~10–20 min) +
-  CUDA-graph capture. Pre-bake with `python3 -m sglang.compile_deep_gemm` (same args)
-  to make restarts fast. During this phase GPU0 drives compilation (oscillates
-  0↔100%) while GPUs 1–7 spin-wait at a barrier (100% util but ~126 W).
+  CUDA-graph capture. During this phase GPU0 drives compilation (oscillates 0↔100%)
+  while GPUs 1–7 spin-wait at a barrier (100% util but ~126 W). The JIT kernels are
+  persisted to the `dynamo-jit-cache` volume (`/home/dynamo/.cache`), so **only the
+  first start pays this cost** — later restarts on the same image/GPU reuse the cache
+  and come up fast. (Removing the volume or changing the SGLang/GPU arch invalidates
+  it and triggers one more recompile.)

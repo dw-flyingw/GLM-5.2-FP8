@@ -68,6 +68,11 @@ services:
       HF_HUB_OFFLINE: "1"
     volumes:
       - "${HF_CACHE:-/data/huggingface}:${HF_CACHE:-/data/huggingface}"
+      # Persist JIT-compiled kernels (DeepGEMM, FlashInfer, Triton, tvm-ffi) across
+      # container recreation so restarts skip the ~10-20 min DeepGEMM precompile +
+      # warmup. The cache dir exists in the image owned by the 'dynamo' user, so the
+      # named volume inherits that ownership on first mount (writes succeed).
+      - "dynamo-jit-cache:/home/dynamo/.cache"
     depends_on: [etcd, nats]
     entrypoint: ["python3", "-m", "dynamo.sglang"]
     # SGLang engine args pass straight through. nsa backend + fp8 KV mirror
@@ -92,3 +97,4 @@ services:
 
 volumes:
   etcd-data:
+  dynamo-jit-cache:   # persisted JIT kernel cache (fast worker restarts)
