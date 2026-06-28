@@ -94,10 +94,7 @@ services:
       # so 128 leaves ~4k tokens/req of avg budget. Raise for high-concurrency
       # workloads (weigh against per-request decode speed). Override via MAX_RUNNING.
       - --max-running-requests=${MAX_RUNNING:-128}
-      # DSA indexer requires page_size 64. Do NOT pass --attention-backend; SGLang
-      # auto-selects the right DSA backend (Hopper + fp8 KV -> dsa/flashmla_kv).
-      # (We previously forced the legacy `nsa` backend; auto-select is the
-      # SGLang-recommended path and verified equivalent/better here.)
+      # DSA indexer requires page_size 64. (Backend is auto-selected -- see above.)
       - --page-size=${PAGE_SIZE:-64}
       # 1M is the model's max, but a single node can't hold a 1M-token KV cache
       # alongside the ~94 GB/GPU weights: at mem-fraction 0.85 the decode pool is
