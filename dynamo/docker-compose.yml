@@ -89,6 +89,11 @@ services:
       - --tp-size=${TP_SIZE:-8}
       - --kv-cache-dtype=fp8_e4m3
       - --mem-fraction-static=${MEM_FRACTION:-0.85}
+      # Concurrency ceiling. Spec decoding auto-caps this to 48; set it explicitly
+      # to run more requests in parallel before they queue. KV pool is ~540k tokens,
+      # so 128 leaves ~4k tokens/req of avg budget. Raise for high-concurrency
+      # workloads (weigh against per-request decode speed). Override via MAX_RUNNING.
+      - --max-running-requests=${MAX_RUNNING:-128}
       # DSA indexer requires page_size 64. Do NOT pass --attention-backend; SGLang
       # auto-selects the right DSA backend (Hopper + fp8 KV -> dsa/flashmla_kv).
       # (We previously forced the legacy `nsa` backend; auto-select is the

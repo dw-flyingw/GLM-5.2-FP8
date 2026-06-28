@@ -52,7 +52,9 @@ curl http://localhost:8000/v1/models
 ```
 
 Tunables (env): `PORT`, `MAX_MODEL_LEN` (→ sglang `--context-length`, default 524288),
-`MEM_FRACTION` (default 0.85), `TP_SIZE` (default 8), `PAGE_SIZE` (default 64, NSA),
+`MEM_FRACTION` (default 0.85), `TP_SIZE` (default 8), `PAGE_SIZE` (default 64, DSA),
+`MAX_RUNNING` (→ `--max-running-requests`, default 128 — the concurrency ceiling;
+spec decoding would otherwise auto-cap it to 48),
 `HF_CACHE` (default `/data/huggingface`), `MODEL`, `SERVED_NAME`, `DYNAMO_IMAGE`.
 MTP speculative decoding is on by default; tune via `SPEC_ALGO` (default `EAGLE`),
 `SPEC_NUM_STEPS` (2), `SPEC_EAGLE_TOPK` (1), `SPEC_NUM_DRAFT` (3), or disable by
