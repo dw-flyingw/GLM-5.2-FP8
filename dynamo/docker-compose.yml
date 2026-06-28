@@ -1,14 +1,19 @@
 # NVIDIA Dynamo serving stack for GLM-5.2-FP8 on 8x H200 (sprocket).
 #
-# Engine: Dynamo SGLang backend (SGLang 0.5.11 in sglang-runtime:1.2.1-cuda13).
-# SGLang is NVIDIA's blessed path for GLM-5 on Dynamo; its `nsa` (Native Sparse
-# Attention) backend handles GLM-5.2's DeepSeek-style sparse attention (DSA).
-# We use it because no Dynamo vLLM runtime ships vLLM >= 0.23.0 yet (required by
-# the vLLM path for GLM-5.2's head_size=704 sparse MLA).
+# Engine: Dynamo SGLang backend (custom image: SGLang 0.5.13.post1). SGLang is
+# NVIDIA's blessed path for GLM-5 on Dynamo and auto-selects the DSA (DeepSeek-style
+# Sparse Attention) kernels for GLM-5.2. We use it because no Dynamo vLLM runtime
+# ships vLLM >= 0.23.0 yet (required by the vLLM path for head_size=704 sparse MLA).
 #
-# Topology: AGGREGATED, tensor-parallel across all 8 GPUs. The model is ~756 GB,
-# so a full copy needs ~6 H200s; a disaggregated prefill+decode split (a full
-# copy PER worker) does not fit on one node -- that requires >= 2 nodes.
+# Topology: single-node, AGGREGATED tensor-parallel over all 8 GPUs (TP=8) + MTP/EAGLE
+# speculative decoding. We benchmarked SGLang's "throughput" config (EP=8 +
+# --enable-dp-attention) on this node and it REGRESSED on every axis -- ~0.6x system
+# tok/s at conc 32 and worse single-stream latency -- because DP-attention only pays
+# off at hundreds of concurrent requests, while one node caps at 48 max-running-reqs
+# (6/rank); below that the DP+EP all-to-all overhead isn't amortized, and the replicated
+# attention weights shrink the KV pool (540k -> 292k tokens). So TP=8 stays. The EP+DP
+# config is the right choice only on >= 2 nodes / very high concurrency. (Disaggregated
+# prefill/decode -- a full model copy per worker -- also needs >= 2 nodes.)
 #
 # All services use host networking, so the frontend binds :8000 on the host and
 # workers reach etcd (:2379) / nats (:4222) over localhost.
@@ -53,7 +58,7 @@ services:
     command: ["--http-port", "${PORT:-8000}"]
     restart: unless-stopped
 
-  # Aggregated worker: full model, tensor-parallel over all 8 GPUs.
+  # Aggregated worker: full model, tensor-parallel over all 8 GPUs (TP=8) + MTP.
   worker:
     image: ${DYNAMO_IMAGE:-glm52-dynamo-sglang:0.5.13post1}
     network_mode: host
@@ -75,24 +80,37 @@ services:
       - "dynamo-jit-cache:/home/dynamo/.cache"
     depends_on: [etcd, nats]
     entrypoint: ["python3", "-m", "dynamo.sglang"]
-    # SGLang engine args pass straight through. nsa backend + fp8 KV mirror
-    # NVIDIA's GLM-5 recipe; parsers are the Dynamo-side (frontend) parsers.
+    # SGLang engine args pass straight through. We let SGLang AUTO-SELECT the DSA
+    # attention backend (no --attention-backend): on Hopper with fp8 KV it picks
+    # flashmla_kv for prefill+decode. Parsers are the Dynamo-side (frontend) parsers.
     command:
       - --model-path=${MODEL:-zai-org/GLM-5.2-FP8}
       - --served-model-name=${SERVED_NAME:-glm-5.2-fp8}
       - --tp-size=${TP_SIZE:-8}
       - --kv-cache-dtype=fp8_e4m3
       - --mem-fraction-static=${MEM_FRACTION:-0.85}
-      - --attention-backend=nsa
+      # DSA indexer requires page_size 64. Do NOT pass --attention-backend; SGLang
+      # auto-selects the right DSA backend (Hopper + fp8 KV -> dsa/flashmla_kv).
+      # (We previously forced the legacy `nsa` backend; auto-select is the
+      # SGLang-recommended path and verified equivalent/better here.)
       - --page-size=${PAGE_SIZE:-64}
-      - --context-length=${MAX_MODEL_LEN:-262144}
+      # 1M is the model's max, but a single node can't hold a 1M-token KV cache
+      # alongside the ~94 GB/GPU weights: at mem-fraction 0.85 the decode pool is
+      # ~540k tokens (max_total_num_tokens=540800), so 512k is the largest length
+      # a full-length request can actually be served at. (True 1M needs >= 2 nodes.)
+      # Override with MAX_MODEL_LEN if you change memory.
+      - --context-length=${MAX_MODEL_LEN:-524288}
       - --trust-remote-code
       - --dyn-tool-call-parser=glm47
       - --dyn-reasoning-parser=glm45
-    # EXTRA_ARGS lets you add MTP/EAGLE speculative decoding etc. without editing
-    # this file, e.g. EXTRA_ARGS="--speculative-algorithm EAGLE ..." (see README).
-    # (compose has no array-append; pass perf knobs via env-substituted flags above
-    #  or uncomment and extend the command list.)
+      # MTP speculative decoding: GLM-5.2 ships 1 MTP layer; EAGLE drives it from the
+      # main checkpoint (no separate draft model). topk=1 => a draft chain, so
+      # num-draft-tokens == num-steps + 1. Verified to compose with the auto-selected
+      # DSA backend on H200 (accept len ~2.2-2.8); env-overridable for tuning.
+      - --speculative-algorithm=${SPEC_ALGO:-EAGLE}
+      - --speculative-num-steps=${SPEC_NUM_STEPS:-2}
+      - --speculative-eagle-topk=${SPEC_EAGLE_TOPK:-1}
+      - --speculative-num-draft-tokens=${SPEC_NUM_DRAFT:-3}
     restart: "no"
 
 volumes:

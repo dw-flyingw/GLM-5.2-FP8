@@ -15,10 +15,12 @@ Verified on sprocket (2026-06-27): **no published Dynamo `vllm-runtime` image, n
 `kimi-k2.6-dev`→0.21.0. So we use Dynamo's **SGLang** backend — NVIDIA's own GLM-5
 Dynamo recipe (`ai-dynamo/dynamo/recipes/glm-5-nvfp4`) is SGLang too.
 
-The image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1-cuda13` bundles **SGLang 0.5.11**,
-which registers `GlmMoeDsaForCausalLM` and ships the `nsa` (Native Sparse Attention)
-backend with the DSA indexer + MTP support. It auto-configures NSA for this arch and has
-a non-Blackwell (Hopper) code path.
+Our custom image (see `Dockerfile`) bundles **SGLang 0.5.13.post1**, which registers
+`GlmMoeDsaForCausalLM` and **auto-selects the DSA attention backend** for this arch: on
+Hopper + fp8 KV it picks `dsa`/`flashmla_kv` (prefill+decode), with the DSA indexer
+(`sgl-kernel` topk) + MTP support. We pass **no** `--attention-backend` and let SGLang
+choose — that is the SGLang-recommended path and, measured on this box, beats the legacy
+`nsa` backend we used to force (~+8% system tok/s at conc 32).
 
 ## Why aggregated only (no disaggregation on one node)
 
@@ -49,33 +51,78 @@ curl http://localhost:8000/v1/models
 ./stop.sh
 ```
 
-Tunables (env): `PORT`, `MAX_MODEL_LEN` (→ sglang `--context-length`, default 262144),
+Tunables (env): `PORT`, `MAX_MODEL_LEN` (→ sglang `--context-length`, default 524288),
 `MEM_FRACTION` (default 0.85), `TP_SIZE` (default 8), `PAGE_SIZE` (default 64, NSA),
 `HF_CACHE` (default `/data/huggingface`), `MODEL`, `SERVED_NAME`, `DYNAMO_IMAGE`.
+MTP speculative decoding is on by default; tune via `SPEC_ALGO` (default `EAGLE`),
+`SPEC_NUM_STEPS` (2), `SPEC_EAGLE_TOPK` (1), `SPEC_NUM_DRAFT` (3), or disable by
+editing the worker `command:` in `docker-compose.yml`.
 
 ## Serving config (mirrors the model card / NVIDIA recipe)
 
-- `--tp-size 8`, `--kv-cache-dtype fp8_e4m3`
-- `--attention-backend nsa` (DSA sparse attention), `--page-size 64`
+- `--tp-size 8`, `--kv-cache-dtype fp8_e4m3`, `--page-size 64`
+- **DSA attention backend auto-selected** — no `--attention-backend`; SGLang picks
+  `dsa`/`flashmla_kv` (Hopper + fp8 KV). Verified ~+8% system tok/s at conc 32 vs the
+  legacy `nsa` backend we used to force.
 - `--dyn-tool-call-parser glm47`, `--dyn-reasoning-parser glm45` (Dynamo frontend parsers)
+- **`--context-length 524288` (512K).** 1M is the model's max, but a single node
+  can't hold a 1M-token KV cache next to the ~94 GB/GPU weights: at
+  `--mem-fraction-static 0.85` the decode pool is `max_total_num_tokens=540800`,
+  so 512K is the largest length a full request can actually be served at. True 1M
+  needs ≥ 2 nodes (same reason as disaggregation). To chase a larger pool you'd
+  raise `MEM_FRACTION` toward ~0.93 (only ~9 GB/GPU free — risks OOM at graph
+  capture, and still falls short of 1M).
+- **MTP / EAGLE speculative decoding (enabled).** GLM-5.2 ships 1 MTP layer; EAGLE
+  drives it from the main checkpoint (no separate draft model):
+  `--speculative-algorithm EAGLE --speculative-num-steps 2 --speculative-eagle-topk 1 --speculative-num-draft-tokens 3`.
+  Verified to compose with the `nsa` backend on H200 (Hopper) — worker logs show
+  `accept len ≈ 2.2–2.8` and ~2× single-stream decode (see Benchmark).
 
-### Performance levers (add after the baseline is up)
+### Performance levers
 
-- **MTP / EAGLE speculative decoding** (GLM-5.2 has 1 MTP layer). Append to the worker
-  command in `docker-compose.yml`:
-  `--speculative-algorithm EAGLE --speculative-num-steps 2 --speculative-eagle-topk 1 --speculative-num-draft-tokens 3`
-  (mirrors the recipe; verify it composes with NSA on Hopper).
+- **MoE EP + DP-attention** (`--ep-size 8 --dp-size 8 --enable-dp-attention`) — SGLang's
+  documented 8×H200 "throughput" config. **Benchmarked on this node (2026-06-28) and it
+  regressed on every axis**, so it is *not* used:
+  | conc | metric | TP=8 (this stack) | EP+DP-attention |
+  |---|---|---|---|
+  | 1  | decode tok/s/req | **111.6** | 57.8 |
+  | 32 | system tok/s     | **1580.4** | 910.1 |
+  | 32 | TTFT p99         | 959 ms | (64-conc) 8447 ms |
+
+  DP-attention *replicates* the MLA/dense weights on every DP rank (94→102 GB/GPU),
+  halving the KV pool (540k→292k tokens, capping single-request context at ~292K), and
+  only pays off at hundreds of concurrent requests — but one node caps at 48 max-running
+  (6/rank). It's the right config only on ≥ 2 nodes / very high concurrency.
 - **KV-aware routing** — add `--router-mode kv` to the frontend and a `--kv-events-config`
-  to the worker; only a win with ≥ 2 workers.
-- **MoE scaling** — `--ep-size` / dp-attention for expert parallelism across the 8 GPUs.
+  to the worker; only a win with ≥ 2 workers/replicas.
 
 ## Benchmark
 
+The runtime image does **not** ship `aiperf`/`genai-perf` (so `bench.sh` won't run
+here), and `sglang.bench_serving`'s random dataset needs to fetch a corpus from
+HF Hub — both blocked on this offline box. Use the bundled stdlib streamer instead
+(no tokenizer / no docker), which streams `/v1/chat/completions` and reports
+TTFT / ITL / decode throughput:
+
 ```bash
-./bench.sh http://localhost:8000 32 200   # concurrency 32, 200 prompts
+./bench_stream.py --concurrency 1  --num 16  --max-tokens 256   # latency
+./bench_stream.py --concurrency 32 --num 128 --max-tokens 256   # throughput
 ```
 
-Record TTFT / ITL / throughput here once measured.
+### Results — MTP speculative decoding OFF vs ON (8× H200, TP=8, 2026-06-27)
+
+| Profile | Metric | MTP off | MTP on | Δ |
+|---|---|---|---|---|
+| Latency (conc 1)   | decode tok/s (per req) | 75.4   | **150.0** | **1.99×** |
+| Latency (conc 1)   | system tok/s           | 74.7   | 136.9     | 1.83× |
+| Latency (conc 1)   | TTFT mean              | 45 ms  | 169 ms    | +draft overhead |
+| Throughput (conc 32) | system tok/s         | 1636.9 | **1975.0** | 1.21× |
+| Throughput (conc 32) | decode tok/s (per req) | 52.5 | 73.9      | 1.41× |
+
+Worker decode stats with MTP on show `accept len ≈ 2.2–2.8` (accept rate
+0.54–0.90). Spec decoding ~doubles single-stream decode and adds ~20% aggregate
+throughput; TTFT rises (the draft pass) and the win shrinks at high concurrency —
+the expected speculative-decoding profile.
 
 ## Status / verification checklist
 
@@ -84,12 +131,21 @@ Record TTFT / ITL / throughput here once measured.
       (1.2.1→0.5.11, 1.3.0-dev.1→0.5.12.post1) → custom image (see `Dockerfile`):
       Dynamo dev base + `sglang==0.5.13.post1` + `sglang-kernel==0.4.3`.
 - [x] Model fits aggregated TP=8 (~94 GB/GPU weights); disagg needs ≥ 2 nodes
-- [x] Aggregated stack boots, worker loads weights, NSA selected on H200, registers
+- [x] Aggregated stack boots, worker loads weights, DSA backend auto-selected on H200
+      (`dsa`/`flashmla_kv`, no `--attention-backend` override), registers
 - [x] OpenAI smoke tests pass: `/v1/models` lists `glm-5.2-fp8`; chat completion
       returns a clean answer with `reasoning_content` (glm45 reasoning parser working)
 - [x] Tool-call (`glm47`) exercised with a real tool schema — `get_weather` via the
       LiteLLM gateway returns `finish_reason: tool_calls` with structured args
-- [ ] Benchmark vs vLLM recorded
+- [x] **MTP / EAGLE speculative decoding enabled and verified** — composes with the
+      auto-selected DSA backend on H200; `accept len ≈ 2.2–2.8`, ~2× single-stream decode
+- [x] **EP + DP-attention "throughput" config benchmarked and rejected** (2026-06-28):
+      regressed to 910 vs 1580 system tok/s at conc 32 + halved KV pool — TP=8 stays
+      (it's a ≥ 2-node lever; see Performance levers)
+- [x] **Context raised to 512K** (`--context-length 524288`); 1M is not servable on
+      one node (KV pool `max_total_num_tokens=540800` at mem-fraction 0.85)
+- [x] Benchmark recorded (MTP off vs on, `bench_stream.py`) — see Benchmark section
+- [ ] Benchmark vs the vLLM path (still blocked: no Dynamo vLLM ≥ 0.23.0 image)
 
 ### Build gotchas (this environment)
 

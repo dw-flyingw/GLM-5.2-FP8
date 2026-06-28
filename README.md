@@ -27,9 +27,12 @@ docker compose logs -f worker    # watch startup (first boot is slow; see below)
 ```
 
 The stack = etcd + NATS + Dynamo frontend + one SGLang worker (aggregated, TP=8,
-`nsa` attention backend, fp8 KV cache). Disaggregated prefill/decode is **not possible
-on a single node** for this model (a full copy per worker exceeds 8 GPUs) — it needs ≥ 2
-nodes. Details and tunables: [`dynamo/README.md`](dynamo/README.md).
+auto-selected DSA attention backend (`flashmla_kv` on Hopper+fp8), fp8 KV cache,
+**MTP/EAGLE speculative decoding on** — ~2× single-stream decode). Context is served at **512K** (`--context-length 524288`); the
+model's 1M max isn't servable on one node (the KV pool tops out at ~540K tokens
+alongside the weights). Disaggregated prefill/decode is **not possible on a single
+node** for this model (a full copy per worker exceeds 8 GPUs) — it needs ≥ 2 nodes.
+Details, tunables, and benchmarks: [`dynamo/README.md`](dynamo/README.md).
 
 > First start runs a DeepGEMM JIT pre-compile + CUDA-graph capture (~10–20 min). It's
 > cacheable with `python3 -m sglang.compile_deep_gemm` (same args).
