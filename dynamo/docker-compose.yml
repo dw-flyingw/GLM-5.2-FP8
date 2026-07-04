@@ -51,6 +51,12 @@ services:
       # (no internet/proxy in-container).
       HF_HOME: "${HF_CACHE:-/data/huggingface}"
       HF_HUB_OFFLINE: "1"
+      # Bind the OpenAI HTTP API to loopback ONLY (not 0.0.0.0). The model must
+      # not be reachable directly over the network — all client traffic goes
+      # through Bifrost on moto, which reaches this loopback port via a
+      # restricted SSH tunnel (moto's ~/glm-tunnel/run.sh -> sprocket:127.0.0.1:8000).
+      # Override with HTTP_HOST=0.0.0.0 to re-expose (not recommended).
+      DYN_HTTP_HOST: "${HTTP_HOST:-127.0.0.1}"
     volumes:
       - "${HF_CACHE:-/data/huggingface}:${HF_CACHE:-/data/huggingface}"
     depends_on: [etcd, nats]
