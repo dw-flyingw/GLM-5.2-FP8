@@ -5,7 +5,7 @@
 #
 # NOTE: the current runtime image ships neither aiperf nor genai-perf, and
 # sglang.bench_serving's random dataset needs to fetch a corpus from HF Hub
-# (blocked offline). On this box use ./bench_stream.py instead (stdlib only, no
+# (blocked offline). In an offline environment use ./bench_stream.py instead (stdlib only, no
 # docker/tokenizer) — that's what the recorded numbers in README.md come from.
 # This script is kept for environments where aiperf/genai-perf are available.
 #

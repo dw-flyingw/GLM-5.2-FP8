@@ -1,4 +1,4 @@
-# NVIDIA Dynamo serving stack for GLM-5.2-FP8 on 8x H200 (sprocket).
+# NVIDIA Dynamo serving stack for GLM-5.2-FP8 on 8x H200.
 #
 # Engine: Dynamo SGLang backend (custom image: SGLang 0.5.13.post1). SGLang is
 # NVIDIA's blessed path for GLM-5 on Dynamo and auto-selects the DSA (DeepSeek-style
@@ -7,7 +7,7 @@
 #
 # Topology: single-node, AGGREGATED tensor-parallel over all 8 GPUs (TP=8) + MTP/EAGLE
 # speculative decoding. We benchmarked SGLang's "throughput" config (EP=8 +
-# --enable-dp-attention) on this node and it REGRESSED on every axis -- ~0.6x system
+# --enable-dp-attention) and it REGRESSED on every axis -- ~0.6x system
 # tok/s at conc 32 and worse single-stream latency -- because DP-attention only pays
 # off at hundreds of concurrent requests, while one node caps at 48 max-running-reqs
 # (6/rank); below that the DP+EP all-to-all overhead isn't amortized, and the replicated
@@ -49,16 +49,15 @@ services:
       # The frontend loads the model's config/tokenizer (not weights) on discovery.
       # Point it at the local HF cache + offline so it doesn't try huggingface.co
       # (no internet/proxy in-container).
-      HF_HOME: "${HF_CACHE:-/data/huggingface}"
+      HF_HOME: "${HF_CACHE:-/root/.cache/huggingface}"
       HF_HUB_OFFLINE: "1"
-      # Bind the OpenAI HTTP API to loopback ONLY (not 0.0.0.0). The model must
-      # not be reachable directly over the network — all client traffic goes
-      # through Bifrost on moto, which reaches this loopback port via a
-      # restricted SSH tunnel (moto's ~/glm-tunnel/run.sh -> sprocket:127.0.0.1:8000).
+      # Bind the OpenAI HTTP API to loopback ONLY (not 0.0.0.0). The model should
+      # not be reachable directly over the network — front it with your own reverse
+      # proxy or expose it over a restricted SSH tunnel as needed.
       # Override with HTTP_HOST=0.0.0.0 to re-expose (not recommended).
       DYN_HTTP_HOST: "${HTTP_HOST:-127.0.0.1}"
     volumes:
-      - "${HF_CACHE:-/data/huggingface}:${HF_CACHE:-/data/huggingface}"
+      - "${HF_CACHE:-/root/.cache/huggingface}:${HF_CACHE:-/root/.cache/huggingface}"
     depends_on: [etcd, nats]
     entrypoint: ["python3", "-m", "dynamo.frontend"]
     command: ["--http-port", "${PORT:-8000}"]
@@ -75,10 +74,10 @@ services:
       stack: 67108864
     environment:
       <<: *dynamo-env
-      HF_HOME: "${HF_CACHE:-/data/huggingface}"
+      HF_HOME: "${HF_CACHE:-/root/.cache/huggingface}"
       HF_HUB_OFFLINE: "1"
     volumes:
-      - "${HF_CACHE:-/data/huggingface}:${HF_CACHE:-/data/huggingface}"
+      - "${HF_CACHE:-/root/.cache/huggingface}:${HF_CACHE:-/root/.cache/huggingface}"
       # Persist JIT-compiled kernels (DeepGEMM, FlashInfer, Triton, tvm-ffi) across
       # container recreation so restarts skip the ~10-20 min DeepGEMM precompile +
       # warmup. The cache dir exists in the image owned by the 'dynamo' user, so the

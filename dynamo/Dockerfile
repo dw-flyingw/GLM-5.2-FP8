@@ -14,9 +14,9 @@ FROM ${BASE}
 
 ARG SGLANG_VERSION=0.5.13.post1
 
-# This network is behind a corporate proxy; pip in the build container needs it.
-# Pass via --build-arg (see serve.sh). Build with --network=host so the internal
-# proxy host is reachable.
+# If your build host is behind a proxy, pip in the build container needs it.
+# Pass via --build-arg (see serve.sh). Build with --network=host so the proxy is
+# reachable from the container.
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY

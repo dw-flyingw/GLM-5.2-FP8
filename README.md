@@ -1,6 +1,6 @@
 # GLM-5.2-FP8 on NVIDIA Dynamo (SGLang, 8× H200)
 
-Serves [`zai-org/GLM-5.2-FP8`](https://huggingface.co/zai-org/GLM-5.2-FP8) on `sprocket`
+Serves [`zai-org/GLM-5.2-FP8`](https://huggingface.co/zai-org/GLM-5.2-FP8) on a single node
 across all 8 H200 GPUs via **NVIDIA Dynamo** with the **SGLang** backend, exposing an
 OpenAI-compatible API on `:8000`.
 
@@ -15,7 +15,7 @@ OpenAI-compatible API on `:8000`.
   MLA attention, **DeepSeek-style Sparse Attention (DSA)** with an indexer
   (`index_topk=2048`), FP8 block-quant (128×128, e4m3), 78 layers, 1 MTP layer, 1M
   max context. ~756 GB of weights (≈94 GB/GPU at TP=8).
-- Weights live in the shared HF cache at `/data/huggingface` and are not re-downloaded.
+- Weights live in a shared Hugging Face cache (point `HF_CACHE` at it); they are not re-downloaded.
 
 ## Serve
 

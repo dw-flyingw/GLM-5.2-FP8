@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local compose env (not committed; e.g. HF_CACHE on the serving host)
+dynamo/.env

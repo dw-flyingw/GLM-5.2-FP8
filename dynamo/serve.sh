@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 IMAGE="${DYNAMO_IMAGE:-glm52-dynamo-sglang:0.5.13post1}"
 
 # Build the custom SGLang-0.5.13.post1 image if it's not present. --network=host is
-# required: Docker's default bridge network can't reach pypi.org in this environment.
+# required: Docker's default bridge network can't reach pypi.org behind a proxy.
 if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
   echo "Image ${IMAGE} not found; building (needs host networking + proxy for pip) ..."
   docker build --network=host \

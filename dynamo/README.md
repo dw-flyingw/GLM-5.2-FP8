@@ -1,6 +1,6 @@
 # GLM-5.2-FP8 on NVIDIA Dynamo (SGLang backend, 8× H200)
 
-Serves `zai-org/GLM-5.2-FP8` on `sprocket` using **NVIDIA Dynamo** as the
+Serves `zai-org/GLM-5.2-FP8` on a single node using **NVIDIA Dynamo** as the
 serving/orchestration layer, OpenAI-compatible on host port `:8000`. This is the
 project's serving path (the earlier plain-vLLM container was removed).
 
@@ -9,7 +9,7 @@ project's serving path (the earlier plain-vLLM container was removed).
 GLM-5.2 is `GlmMoeDsaForCausalLM`: MoE + MLA + **DeepSeek-style Sparse Attention (DSA)**
 with `head_size=704`. The vLLM path needs **vLLM ≥ 0.23.0** for that.
 
-Verified on sprocket (2026-06-27): **no published Dynamo `vllm-runtime` image, nor the
+Verified (2026-06-27): **no published Dynamo `vllm-runtime` image, nor the
 `ai-dynamo` PyPI wheel, ships vLLM ≥ 0.23.0.**
 `1.2.1`→0.20.1, `1.3.0-dev.1`→0.22.0 (its sparse-MLA backends cap at `head_size=576`),
 `kimi-k2.6-dev`→0.21.0. So we use Dynamo's **SGLang** backend — NVIDIA's own GLM-5
@@ -19,7 +19,7 @@ Our custom image (see `Dockerfile`) bundles **SGLang 0.5.13.post1**, which regis
 `GlmMoeDsaForCausalLM` and **auto-selects the DSA attention backend** for this arch: on
 Hopper + fp8 KV it picks `dsa`/`flashmla_kv` (prefill+decode), with the DSA indexer
 (`sgl-kernel` topk) + MTP support. We pass **no** `--attention-backend` and let SGLang
-choose — that is the SGLang-recommended path and, measured on this box, beats the legacy
+choose — that is the SGLang-recommended path and beats the legacy
 `nsa` backend we used to force (~+8% system tok/s at conc 32).
 
 ## Why aggregated only (no disaggregation on one node)
@@ -55,7 +55,7 @@ Tunables (env): `PORT`, `MAX_MODEL_LEN` (→ sglang `--context-length`, default 
 `MEM_FRACTION` (default 0.85), `TP_SIZE` (default 8), `PAGE_SIZE` (default 64, DSA),
 `MAX_RUNNING` (→ `--max-running-requests`, default 128 — the concurrency ceiling;
 spec decoding would otherwise auto-cap it to 48),
-`HF_CACHE` (default `/data/huggingface`), `MODEL`, `SERVED_NAME`, `DYNAMO_IMAGE`.
+`HF_CACHE` (default `/root/.cache/huggingface`), `MODEL`, `SERVED_NAME`, `DYNAMO_IMAGE`.
 MTP speculative decoding is on by default; tune via `SPEC_ALGO` (default `EAGLE`),
 `SPEC_NUM_STEPS` (2), `SPEC_EAGLE_TOPK` (1), `SPEC_NUM_DRAFT` (3), or disable by
 editing the worker `command:` in `docker-compose.yml`.
@@ -83,7 +83,7 @@ editing the worker `command:` in `docker-compose.yml`.
 ### Performance levers
 
 - **MoE EP + DP-attention** (`--ep-size 8 --dp-size 8 --enable-dp-attention`) — SGLang's
-  documented 8×H200 "throughput" config. **Benchmarked on this node (2026-06-28) and it
+  documented 8×H200 "throughput" config. **Benchmarked (2026-06-28) and it
   regressed on every axis**, so it is *not* used:
   | conc | metric | TP=8 (this stack) | EP+DP-attention |
   |---|---|---|---|
@@ -102,7 +102,7 @@ editing the worker `command:` in `docker-compose.yml`.
 
 The runtime image does **not** ship `aiperf`/`genai-perf` (so `bench.sh` won't run
 here), and `sglang.bench_serving`'s random dataset needs to fetch a corpus from
-HF Hub — both blocked on this offline box. Use the bundled stdlib streamer instead
+HF Hub — both blocked in an offline environment. Use the bundled stdlib streamer instead
 (no tokenizer / no docker), which streams `/v1/chat/completions` and reports
 TTFT / ITL / decode throughput:
 
@@ -149,9 +149,9 @@ the expected speculative-decoding profile.
 - [x] Benchmark recorded (MTP off vs on, `bench_stream.py`) — see Benchmark section
 - [ ] Benchmark vs the vLLM path (still blocked: no Dynamo vLLM ≥ 0.23.0 image)
 
-### Build gotchas (this environment)
+### Build gotchas (offline / behind-a-proxy environments)
 
-- **Corporate proxy:** Docker bridge can't reach pypi; the build needs
+- **Behind a proxy:** the Docker bridge can't reach PyPI; the build needs
   `--network=host` + `--build-arg HTTP(S)_PROXY` (handled by `serve.sh`).
 - **Frontend needs the HF cache:** on discovery the frontend loads the model
   config/tokenizer (not weights) and will otherwise try huggingface.co and fail —

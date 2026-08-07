@@ -2,7 +2,7 @@
 """Tiny streaming benchmark for the GLM-5.2-FP8 Dynamo (SGLang) OpenAI endpoint.
 
 Stdlib only (no aiperf/genai-perf/tokenizer needed — those aren't in the runtime
-image and the offline box can't fetch a corpus for sglang.bench_serving). Measures
+image and an offline environment can't fetch a corpus for sglang.bench_serving). Measures
 TTFT, inter-token latency (ITL), end-to-end latency and decode throughput by
 streaming /v1/chat/completions with usage accounting. Designed to compare MTP
 speculative decoding OFF vs ON: run it before and after enabling the EAGLE flags.
